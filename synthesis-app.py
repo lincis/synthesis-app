@@ -17,6 +17,18 @@ import sqlalchemy as sa
 from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects.postgresql import insert, JSONB, BYTEA
 
+import logging
+@st.cache_data
+def get_logger():
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.DEBUG)
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
+    return logger
+
+logger = get_logger()
+
 def check_password():
     '''Returns `True` if the user had the correct password.'''
 
@@ -57,19 +69,13 @@ class SparkEmbeddings(Base):
     cluster_id = sa.Column(sa.Integer)
     entity_created = sa.Column(sa.DateTime)
     author_id = sa.Column(sa.VARCHAR(36))
+    parent_id = sa.Column(sa.VARCHAR(36))
 
 class Clusters(Base):
     __tablename__ = "clusters"
     cluster_id = sa.Column(sa.Integer, primary_key = True)
     theme = sa.Column(sa.String)
     model = sa.Column(BYTEA)
-
-import logging
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-handler = logging.StreamHandler()
-handler.setLevel(logging.DEBUG)
-logger.addHandler(handler)
 
 @st.cache_data
 def get_secrets() -> dict[str, str]:
@@ -150,7 +156,8 @@ You will extract a summary of discussion from the list of sparks below.
 You will use exact citations from the sparks to support the summary, mentioning the author with name and ID as {Author:Name;author-id} and spark as {Spark:spark-id}.
 You should constrain your synthesis to minimum 5 and maximum 10 key ideas discussed.
 You should not introduce new ideas, but only summarize the existing ones.
-Your response should be like a recap of discussion, taking into account the chronology of the sparks. Please do not add the date of the spark, but use the order of the sparks to determine the chronology.
+Your response should be like a recap of discussion, taking into account the chronology of the sparks. Each spark may have a parent within the given set, outside it or not set. Is parent ID is set it means that the given Spark is a response to the parent spark.
+Please do not add the date and parent of the spark, but use the order of the sparks to determine the chronology.
 Please write the response as an essay, not as a list of citations.
 Here is an example respones, please make sure you strictly follow the format:
 
@@ -164,6 +171,7 @@ You can use the following sparks to generate your response:
 [SPARK]
     [ID]{row["spark_id"]}[/ID]
     [AUTHOR][NAME]{row["author"]}[/NAME][ID]{row["author_id"]}[/ID][/AUTHOR]
+    [PARENT]{row["parent_id"]}[/PARENT]
     [CREATED]{row["entity_created"]}[/CREATED]
     [TITLE]{row["title"]}[/TITLE]
     [TEXT]{row["fulltext"]}[/TEXT]
@@ -187,18 +195,19 @@ You can use the following sparks to generate your response:
 
 
 def parse_response(response: str, sparks: pd.DataFrame) -> str:
-    author_pattern = re.compile(r'\{Author:\s*(?P<name>.*?);(?P<id>.*?)\}')
-    spark_pattern = re.compile(r'\{Spark:\s*(?P<id>.*?)\}')
+    logger.debug('Response length: ' + str(len(response)))
+    author_pattern = re.compile(r'[\{\(\[]Author:\s*(?P<name>.*?);(?P<id>.*?)[\}\)\]]')
+    spark_pattern = re.compile(r'[\{\(\[]Spark:\s*(?P<id>.*?)[\}\)\]]')
     all_authors = author_pattern.findall(response)
     all_sparks = spark_pattern.findall(response)
     for author in all_authors:
         author_name = sparks[sparks['author_id'] == author[1]]['author'].values[0]
-        replace_pattern = re.compile(f'{{Author:\s*{author[0]};{author[1]}}}')
+        replace_pattern = re.compile(r'[\{\(\[]Author:\s*[\}\)\]]' + re.escape(author[0]) + r';' + re.escape(author[1]) + r'[\}\)\]]')
         response = re.sub(replace_pattern, f'[{author_name}](https://platform.hunome.com/profile/{author[1]})', response)
     for spark in all_sparks:
         spark_title = sparks[sparks['spark_id'] == spark]['title'].values[0]
-        # logger.debug(f'Spark {spark} title: {spark_title}')
-        replace_pattern = re.compile(f'{{Spark:\s*{spark}}}')
+        logger.debug(f'Spark {spark} title: {spark_title}')
+        replace_pattern = re.compile(r'[\{\(\[]Spark:\s*' + re.escape(spark) + r'[\}\)\]]')
         response = re.sub(replace_pattern, f'[{spark_title}](https://platform.hunome.com/sparkmap/view-spark/{spark})', response)
     return response
 
