@@ -193,10 +193,13 @@ def parse_response(response: str, sparks: pd.DataFrame) -> str:
     all_sparks = spark_pattern.findall(response)
     for author in all_authors:
         author_name = sparks[sparks['author_id'] == author[1]]['author'].values[0]
-        response = re.sub(author_pattern, f'[{author_name}](https://platform.hunome.com/profile/{author[1]})', response)
+        replace_pattern = re.compile(f'{{Author:\s*{author[0]};{author[1]}}}')
+        response = re.sub(replace_pattern, f'[{author_name}](https://platform.hunome.com/profile/{author[1]})', response)
     for spark in all_sparks:
         spark_title = sparks[sparks['spark_id'] == spark]['title'].values[0]
-        response = re.sub(spark_pattern, f'[{spark_title}](https://platform.hunome.com/sparkmap/view-spark/{spark})', response)
+        # logger.debug(f'Spark {spark} title: {spark_title}')
+        replace_pattern = re.compile(f'{{Spark:\s*{spark}}}')
+        response = re.sub(replace_pattern, f'[{spark_title}](https://platform.hunome.com/sparkmap/view-spark/{spark})', response)
     return response
 
 
