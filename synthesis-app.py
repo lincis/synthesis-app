@@ -128,7 +128,8 @@ def get_sparks(map_id: str, min_date: date, max_date: date) -> pd.DataFrame:
         echo = True
     )
     with Session(engine) as session:
-        statement = session.query(SparkEmbeddings).filter(
+        statement = session.query(SparkEmbeddings, Clusters.theme).filter(
+            SparkEmbeddings.cluster_id == Clusters.cluster_id,
             SparkEmbeddings.map_id == map_id,
             SparkEmbeddings.entity_created >= min_date,
             SparkEmbeddings.entity_created <= max_date
@@ -201,11 +202,17 @@ def parse_response(response: str, sparks: pd.DataFrame) -> str:
     all_authors = author_pattern.findall(response)
     all_sparks = spark_pattern.findall(response)
     for author in all_authors:
-        author_name = sparks[sparks['author_id'] == author[1]]['author'].values[0]
+        try:
+            author_name = sparks[sparks['author_id'] == author[1]]['author'].values[0]
+        except IndexError:
+            continue
         replace_pattern = re.compile(r'[\{\(\[]Author:\s*[\}\)\]]' + re.escape(author[0]) + r';' + re.escape(author[1]) + r'[\}\)\]]')
         response = re.sub(replace_pattern, f'[{author_name}](https://platform.hunome.com/profile/{author[1]})', response)
     for spark in all_sparks:
-        spark_title = sparks[sparks['spark_id'] == spark]['title'].values[0]
+        try:
+            spark_title = sparks[sparks['spark_id'] == spark]['title'].values[0]
+        except IndexError:
+            continue
         logger.debug(f'Spark {spark} title: {spark_title}')
         replace_pattern = re.compile(r'[\{\(\[]Spark:\s*' + re.escape(spark) + r'[\}\)\]]')
         response = re.sub(replace_pattern, f'[{spark_title}](https://platform.hunome.com/sparkmap/view-spark/{spark})', response)
