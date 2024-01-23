@@ -19,12 +19,15 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects.postgresql import insert, JSONB, BYTEA
 
 import logging
+
 @st.cache_data
 def get_logger():
+    formatter = logging.Formatter('%(asctime)s %(levelname)s %(name)s %(message)s')
     logger = logging.getLogger(__name__)
     logger.setLevel(logging.DEBUG)
     handler = logging.StreamHandler()
     handler.setLevel(logging.DEBUG)
+    handler.setFormatter(formatter)
     logger.addHandler(handler)
     return logger
 
@@ -99,7 +102,7 @@ def get_secrets() -> dict[str, str]:
 
     return secrets
 
-@st.cache_data
+@st.cache_data(ttl = '1d')
 def get_sparkmaps() -> pd.DataFrame:
     secrets = get_secrets()
     engine = create_engine(f'postgresql+psycopg2://{secrets["DWH_USER"]}:{secrets["DWH_PW"]}@{secrets["DWH_HOST"]}:5432/{secrets["DWH_DBNAME"]}')
@@ -112,7 +115,7 @@ def get_sparkmaps() -> pd.DataFrame:
         sparkmaps_df = pd.DataFrame(sparkmaps, columns=['map_id', 'count', 'title'])
         return sparkmaps_df
 
-@st.cache_data
+@st.cache_data(ttl = '1d')
 def get_sparkmap_dates(map_id: str) -> list[date]:
     secrets = get_secrets()
     engine = create_engine(f'postgresql+psycopg2://{secrets["DWH_USER"]}:{secrets["DWH_PW"]}@{secrets["DWH_HOST"]}:5432/{secrets["DWH_DBNAME"]}')
@@ -124,7 +127,7 @@ def get_sparkmap_dates(map_id: str) -> list[date]:
         dates.sort()
         return dates
 
-@st.cache_data
+@st.cache_data(ttl = '1d')
 def get_sparks(map_id: str, min_date: date, max_date: date) -> pd.DataFrame:
     secrets = get_secrets()
     engine = create_engine(
@@ -184,7 +187,8 @@ You can use the following sparks to generate your response:
         messages = [
             {'role': 'system', 'content': 'You are a helpful assistant.'},
             {'role': 'user', 'content': prompt},
-        ]
+        ],
+        temperature = 0.5,
     )
     logger.info(f'Token usage: {response.usage}')
     return response.choices[0].message.content
@@ -233,22 +237,22 @@ def parse_response(response: str, sparks: pd.DataFrame) -> str:
         logger.debug(f'Spark {spark} title: {spark_title}')
         replace_pattern = re.compile(r'[\{\(\[]Spark:\s*' + re.escape(spark) + r'[\}\)\]]')
         response = re.sub(replace_pattern, f'[{spark_title}](https://platform.hunome.com/sparkmap/view-spark/{spark})', response)
-    uuid_pattern = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+    uuid_pattern = re.compile(r'[^/][0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
     all_uids = uuid_pattern.findall(response)
     for uid in all_uids:
         try:
-            uid_name = sparks[sparks['spark_id'] == uid]['title'].values[0]
+            uid_name = sparks[sparks['spark_id'] == uid[1:]]['title'].values[0]
             logger.debug(f'UID {uid} name: {uid_name}')
-            replace_pattern = re.compile(r'[\{\(\[]' + re.escape(uid) + r'[\}\)\]]')
-            response = re.sub(replace_pattern, f'[{uid_name}](https://platform.hunome.com/sparkmap/view-spark/{uid})', response)
+            replace_pattern = re.compile(r'[^/]' + re.escape(uid))
+            response = re.sub(replace_pattern, f'{uid[0]}[{uid_name}](https://platform.hunome.com/sparkmap/view-spark/{uid[1:]})', response)
             continue
         except IndexError:
             pass
         try:
-            uid_name = sparks[sparks['author_id'] == uid]['author'].values[0]
+            uid_name = sparks[sparks['author_id'] == uid[1:]]['author'].values[0]
             logger.debug(f'UID {uid} name: {uid_name}')
-            replace_pattern = re.compile(r'[\{\(\[]' + re.escape(uid) + r'[\}\)\]]')
-            response = re.sub(replace_pattern, f'[{uid_name}](https://platform.hunome.com/profile/{uid})', response)
+            replace_pattern = re.compile(r'[^/]' + re.escape(uid))
+            response = re.sub(replace_pattern, f'{uid[0]}[{uid_name}](https://platform.hunome.com/profile/{uid[1:]})', response)
             continue
         except IndexError:
             pass
@@ -292,6 +296,10 @@ if __name__ == '__main__':
     st.sidebar.write(f':{color}[Found {sparks.shape[0]} sparks in {sparks.cluster_id.unique().shape[0]} clusters ({"/".join(sparks_in_cluster.spark_id.astype(str).values.tolist())}).]')
     if st.sidebar.button('Generate synthesis'):
         st.write(parse_response(generate_synthesys(sparks, model), sparks))
+
+    if st.sidebar.button("Clear synthesis cache"):
+        get_synthesis.clear()
+        generate_synthesys.clear()
     st.sidebar.markdown('---')
     st.sidebar.markdown(f'''
     **NB!** Minimum number of sparks for synthesis is {SPARK_MIN_LIMIT}.
