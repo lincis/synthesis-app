@@ -4,6 +4,7 @@ st.set_page_config(page_title = 'Hunome RAG prototype', page_icon = '🧊', layo
 # Importing the libraries
 import os
 import re
+import datetime
 import hmac
 from infisical import InfisicalClient
 import pandas as pd
@@ -28,6 +29,9 @@ def get_logger():
     return logger
 
 logger = get_logger()
+
+SPARK_MIN_LIMIT = 5
+SPARK_MAX_LIMIT = 40
 
 def check_password():
     '''Returns `True` if the user had the correct password.'''
@@ -141,18 +145,9 @@ def get_sparks(map_id: str, min_date: date, max_date: date) -> pd.DataFrame:
         sparks_df['entity_created'] = pd.to_datetime(sparks_df['entity_created'])
         return sparks_df
 
-
 @st.cache_data
-def generate_synthesys(sparks: pd.DataFrame, model: str) -> str:
-    unique_dates = sparks['entity_updated'].dt.date.unique().shape[0]
-    if sparks.shape[0] == 0:
-        return 'No sparks found. Please extend the time interval.'
-    if sparks.shape[0] < 5:
-        return f'Not enough sparks found ({sparks.shape[0]}). Please extend the time interval.'
-    if sparks.shape[0] > 50 and unique_dates > 1:
-        return f'Too many sparks found ({sparks.shape[0]}). Please reduce the time interval.'
-    st.write(f'Found {sparks.shape[0]} sparks.')
-    prompt = '''
+def get_synthesis(sparks: pd.DataFrame, model:str) -> str:
+    prompt_template = '''
 You will extract a summary of discussion from the list of sparks below.
 You will use exact citations from the sparks to support the summary, mentioning the author with name and ID as {Author:Name;author-id} and spark as {Spark:spark-id}.
 You should constrain your synthesis to minimum 5 and maximum 10 key ideas discussed.
@@ -167,7 +162,7 @@ Here is an example respones, please make sure you strictly follow the format:
 You can use the following sparks to generate your response:
 {{SPARKS}}
     '''
-    prompt = prompt.replace('{{SPARKS}}', '\n'.join(
+    prompt = prompt_template.replace('{{SPARKS}}', '\n'.join(
         [f'''
 [SPARK]
     [ID]{row["spark_id"]}[/ID]
@@ -178,7 +173,7 @@ You can use the following sparks to generate your response:
     [TEXT]{row["fulltext"]}[/TEXT]
 [/SPARK]''' for _, row in sparks.iterrows()]
     ))
-    logger.debug('Prompt length: ' + str(len(prompt)))
+    logger.debug('Prompt length: ' + str(len(re.findall(r'\w+', prompt))))
     secrets = get_secrets()
     client = openai.OpenAI(
         api_key = secrets['TOGETHER_API_KEY'],
@@ -191,12 +186,33 @@ You can use the following sparks to generate your response:
             {'role': 'user', 'content': prompt},
         ]
     )
+    logger.info(f'Token usage: {response.usage}')
     return response.choices[0].message.content
+
+
+@st.cache_data
+def generate_synthesys(sparks: pd.DataFrame, model: str) -> str:
+    unique_dates = sparks['entity_updated'].dt.date.unique().shape[0]
+    sparks_in_cluster = sparks.groupby('cluster_id').count()['spark_id'].reset_index()
+    if sparks.shape[0] < 5:
+        return f'Too few sparks for synthesis. Found {sparks.shape[0]} sparks in {sparks.cluster_id.unique().shape[0]} clusters ({"/".join(sparks.groupby("cluster_id").count()["spark_id"].astype(str).values.tolist())}).'
+    elif sparks_in_cluster.spark_id.max() > 50 and sparks['entity_updated'].dt.date.unique().shape[0] > 1:
+        return f'Too many sparks for synthesis. Found {sparks.shape[0]} sparks in {sparks.cluster_id.unique().shape[0]} clusters ({"/".join(sparks.groupby("cluster_id").count()["spark_id"].astype(str).values.tolist())}).'
+    if sparks.shape[0] > SPARK_MAX_LIMIT and sparks_in_cluster.shape[0] > 1:
+        synthesis = ''
+        for cluster in sparks.cluster_id.unique():
+            cluster_theme = sparks[sparks['cluster_id'] == cluster]['theme'].values[0]
+            cluster_sparks = sparks[sparks['cluster_id'] == cluster]
+            cluster_synthesis = get_synthesis(cluster_sparks, model)
+            synthesis += f'**Cluster: {cluster_theme}**\n\n{cluster_synthesis}\n\n'
+        return synthesis
+    else:
+        return get_synthesis(sparks, model)
 
 
 
 def parse_response(response: str, sparks: pd.DataFrame) -> str:
-    logger.debug('Response length: ' + str(len(response)))
+    logger.debug('Response length: ' + str(len(re.findall(r'\w+', response))))
     author_pattern = re.compile(r'[\{\(\[]Author:\s*(?P<name>.*?);(?P<id>.*?)[\}\)\]]')
     spark_pattern = re.compile(r'[\{\(\[]Spark:\s*(?P<id>.*?)[\}\)\]]')
     all_authors = author_pattern.findall(response)
@@ -206,7 +222,8 @@ def parse_response(response: str, sparks: pd.DataFrame) -> str:
             author_name = sparks[sparks['author_id'] == author[1]]['author'].values[0]
         except IndexError:
             continue
-        replace_pattern = re.compile(r'[\{\(\[]Author:\s*[\}\)\]]' + re.escape(author[0]) + r';' + re.escape(author[1]) + r'[\}\)\]]')
+        logger.debug(f'Author {author} name: {author_name}')
+        replace_pattern = re.compile(r'[\{\(\[]Author:\s*' + re.escape(author[0]) + r';' + re.escape(author[1]) + r'[\}\)\]]')
         response = re.sub(replace_pattern, f'[{author_name}](https://platform.hunome.com/profile/{author[1]})', response)
     for spark in all_sparks:
         try:
@@ -216,6 +233,25 @@ def parse_response(response: str, sparks: pd.DataFrame) -> str:
         logger.debug(f'Spark {spark} title: {spark_title}')
         replace_pattern = re.compile(r'[\{\(\[]Spark:\s*' + re.escape(spark) + r'[\}\)\]]')
         response = re.sub(replace_pattern, f'[{spark_title}](https://platform.hunome.com/sparkmap/view-spark/{spark})', response)
+    uuid_pattern = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+    all_uids = uuid_pattern.findall(response)
+    for uid in all_uids:
+        try:
+            uid_name = sparks[sparks['spark_id'] == uid]['title'].values[0]
+            logger.debug(f'UID {uid} name: {uid_name}')
+            replace_pattern = re.compile(r'[\{\(\[]' + re.escape(uid) + r'[\}\)\]]')
+            response = re.sub(replace_pattern, f'[{uid_name}](https://platform.hunome.com/sparkmap/view-spark/{uid})', response)
+            continue
+        except IndexError:
+            pass
+        try:
+            uid_name = sparks[sparks['author_id'] == uid]['author'].values[0]
+            logger.debug(f'UID {uid} name: {uid_name}')
+            replace_pattern = re.compile(r'[\{\(\[]' + re.escape(uid) + r'[\}\)\]]')
+            response = re.sub(replace_pattern, f'[{uid_name}](https://platform.hunome.com/profile/{uid})', response)
+            continue
+        except IndexError:
+            pass
     return response
 
 
@@ -246,6 +282,23 @@ if __name__ == '__main__':
             sparkmap_dates[-1]
         )
     )
+    sparks = get_sparks(sparkmap_id, time_interval[0], time_interval[1])
+    sparks_in_cluster = sparks.groupby('cluster_id').count()['spark_id'].reset_index()
+    color = 'green'
+    if sparks.shape[0] < 5:
+        color = 'red'
+    elif sparks_in_cluster.spark_id.max() > 50 and sparks['entity_updated'].dt.date.unique().shape[0] > 1:
+        color = 'orange'
+    st.sidebar.write(f':{color}[Found {sparks.shape[0]} sparks in {sparks.cluster_id.unique().shape[0]} clusters ({"/".join(sparks_in_cluster.spark_id.astype(str).values.tolist())}).]')
     if st.sidebar.button('Generate synthesis'):
-        sparks = get_sparks(sparkmap_id, time_interval[0], time_interval[1])
         st.write(parse_response(generate_synthesys(sparks, model), sparks))
+    st.sidebar.markdown('---')
+    st.sidebar.markdown(f'''
+    **NB!** Minimum number of sparks for synthesis is {SPARK_MIN_LIMIT}.
+    Maximum number of sparks for synthesis is {SPARK_MAX_LIMIT} per cluster.
+    If you have more than {SPARK_MAX_LIMIT} sparks, please reduce the time interval.
+    If you have less than {SPARK_MIN_LIMIT} sparks, please extend the time interval.
+    ''')
+    st.sidebar.markdown('**NB!** This is a prototype. The synthesis is generated by an AI model and may not be accurate. Please use it with caution.')
+    st.sidebar.markdown('---')
+    st.sidebar.write(f'© {datetime.date.today().year} Hunome')
