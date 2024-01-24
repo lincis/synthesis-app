@@ -271,7 +271,7 @@ def format_spark_map_select(sparkmaps: dict[str, list[str, int]], sparkmap_id: s
     return f'{sparkmap["title"].values[0]} (#{sparkmap["count"].values[0]}'
 
 def draw_sparkmap(sparks: pd.DataFrame) -> str:
-    pallete = color_palette('Set2', n_colors = sparks.sort_values('cluster_id').cluster_id.unique().shape[0]).as_hex()
+    pallete = color_palette('pastel', n_colors = sparks.sort_values('cluster_id').cluster_id.unique().shape[0]).as_hex()
     pallete = {cluster: pallete[i] for i, cluster in enumerate(sparks.cluster_id.unique())}
     light_grey = '#d3d3d3'
     net = Network(height = '800px', width = '100%')
