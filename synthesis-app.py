@@ -355,7 +355,8 @@ if __name__ == '__main__':
     st.sidebar.write(f':{color}[Found {selected_sparks.shape[0]} sparks in {selected_sparks.cluster_id.unique().shape[0]} clusters ({"/".join(sparks_in_cluster.spark_id.astype(str).values.tolist())}).]')
 
     sparkmap_vis = draw_sparkmap(sparks)
-    st.components.v1.html(sparkmap_vis, height = 820)
+    with st.expander('Spark Map visualization', expanded = True):
+        st.components.v1.html(sparkmap_vis, height = 820)
 
     if st.sidebar.button('Generate synthesis'):
         st.write(parse_response(generate_synthesys(selected_sparks, model), sparks))
