@@ -18,6 +18,10 @@ import sqlalchemy as sa
 from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects.postgresql import insert, JSONB, BYTEA
 
+from pyvis.network import Network
+from tempfile import NamedTemporaryFile
+from seaborn import color_palette
+
 import logging
 
 @st.cache_data
@@ -128,7 +132,10 @@ def get_sparkmap_dates(map_id: str) -> list[date]:
         return dates
 
 @st.cache_data(ttl = '1d')
-def get_sparks(map_id: str, min_date: date, max_date: date) -> pd.DataFrame:
+def get_sparks(
+    map_id: str,
+    # min_date: date, max_date: date
+) -> pd.DataFrame:
     secrets = get_secrets()
     engine = create_engine(
         f'postgresql+psycopg2://{secrets["DWH_USER"]}:{secrets["DWH_PW"]}@{secrets["DWH_HOST"]}:5432/{secrets["DWH_DBNAME"]}',
@@ -138,8 +145,8 @@ def get_sparks(map_id: str, min_date: date, max_date: date) -> pd.DataFrame:
         statement = session.query(SparkEmbeddings, Clusters.theme).filter(
             SparkEmbeddings.cluster_id == Clusters.cluster_id,
             SparkEmbeddings.map_id == map_id,
-            SparkEmbeddings.entity_created >= min_date,
-            SparkEmbeddings.entity_created <= max_date
+            # SparkEmbeddings.entity_created >= min_date,
+            # SparkEmbeddings.entity_created <= max_date
         )
         sparks_df = pd.read_sql(statement.statement, statement.session.bind)
         logger.debug('Sparks shape: ' + str(sparks_df.shape))
@@ -263,6 +270,56 @@ def format_spark_map_select(sparkmaps: dict[str, list[str, int]], sparkmap_id: s
     sparkmap = sparkmaps[sparkmaps['map_id'] == sparkmap_id]
     return f'{sparkmap["title"].values[0]} (#{sparkmap["count"].values[0]}'
 
+def draw_sparkmap(sparks: pd.DataFrame) -> str:
+    pallete = color_palette('Set2', n_colors = sparks.sort_values('cluster_id').cluster_id.unique().shape[0]).as_hex()
+    pallete = {cluster: pallete[i] for i, cluster in enumerate(sparks.cluster_id.unique())}
+    light_grey = '#d3d3d3'
+    net = Network(height = '800px', width = '100%')
+    net.set_options("""
+    var options = {
+                    "layout": {
+                        "randomSeed": 42
+                    }
+                }
+    """)
+    for _, row in sparks.iterrows():
+        logger.debug(f'Adding node {row["spark_id"]} with color {pallete[row["cluster_id"]] if row["is_selected"] else light_grey}')
+        net.add_node(
+            row['spark_id'],
+            label = row['title'][:20],
+            color = pallete[row['cluster_id']] if row['is_selected'] else light_grey,
+            title = f'''
+            Title: {row['title'][:20]}
+            Author: {row['author']}
+            '''
+        )
+    for _, row in sparks.iterrows():
+        if row['parent_id'] and row['parent_id'] in sparks.spark_id.values:
+            net.add_edge(row['parent_id'], row['spark_id'])
+    # Add box shaped nodes with cluster titles
+    step = 50
+    x = -1200
+    y = -800
+    for cluster_id in sparks.cluster_id.unique():
+        cluster_title = f'Cluster {sparks[sparks["cluster_id"] == cluster_id]["theme"].values[0]} ({sparks[sparks["cluster_id"] == cluster_id].shape[0]})'
+        net.add_node(
+            cluster_title,
+            shape = 'box',
+            color = pallete[cluster_id],
+            title = cluster_title,
+            x = x,
+            y = y,
+            physics = False,
+            value = 80
+        )
+        y = y + step
+    
+    with NamedTemporaryFile(mode = 'w', suffix = '.html') as f:
+        net.save_graph(f.name)
+        with open(f.name, 'r') as f:
+            return '\n'.join(f.readlines())
+
+
 if __name__ == '__main__':
     if not check_password():
         st.stop()  # Do not continue if check_password is not True.
@@ -286,16 +343,22 @@ if __name__ == '__main__':
             sparkmap_dates[-1]
         )
     )
-    sparks = get_sparks(sparkmap_id, time_interval[0], time_interval[1])
-    sparks_in_cluster = sparks.groupby('cluster_id').count()['spark_id'].reset_index()
+    sparks = get_sparks(sparkmap_id)
+    sparks['is_selected'] = (sparks['entity_updated'].dt.date >= time_interval[0]) & (sparks['entity_updated'].dt.date <= time_interval[1])
+    selected_sparks = sparks[sparks['is_selected']]
+    sparks_in_cluster = selected_sparks.groupby('cluster_id').count()['spark_id'].reset_index()
     color = 'green'
-    if sparks.shape[0] < 5:
+    if selected_sparks.shape[0] < 5:
         color = 'red'
-    elif sparks_in_cluster.spark_id.max() > 50 and sparks['entity_updated'].dt.date.unique().shape[0] > 1:
+    elif sparks_in_cluster.spark_id.max() > 50 and selected_sparks['entity_updated'].dt.date.unique().shape[0] > 1:
         color = 'orange'
-    st.sidebar.write(f':{color}[Found {sparks.shape[0]} sparks in {sparks.cluster_id.unique().shape[0]} clusters ({"/".join(sparks_in_cluster.spark_id.astype(str).values.tolist())}).]')
+    st.sidebar.write(f':{color}[Found {selected_sparks.shape[0]} sparks in {selected_sparks.cluster_id.unique().shape[0]} clusters ({"/".join(sparks_in_cluster.spark_id.astype(str).values.tolist())}).]')
+
+    sparkmap_vis = draw_sparkmap(sparks)
+    st.components.v1.html(sparkmap_vis, height = 820)
+
     if st.sidebar.button('Generate synthesis'):
-        st.write(parse_response(generate_synthesys(sparks, model), sparks))
+        st.write(parse_response(generate_synthesys(selected_sparks, model), sparks))
 
     if st.sidebar.button("Clear synthesis cache"):
         get_synthesis.clear()
