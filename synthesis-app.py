@@ -1,5 +1,5 @@
 import streamlit as st
-st.set_page_config(page_title = 'Hunome RAG prototype', page_icon = '🧊', layout = 'wide', initial_sidebar_state = 'expanded')
+st.set_page_config(page_title = 'Hunome Synthesis prototype', page_icon = '🧊', layout = 'wide', initial_sidebar_state = 'expanded')
 
 # Importing the libraries
 import os
@@ -23,19 +23,7 @@ from tempfile import NamedTemporaryFile
 from seaborn import color_palette
 
 import logging
-
-@st.cache_data
-def get_logger():
-    formatter = logging.Formatter('%(asctime)s %(levelname)s %(name)s %(message)s')
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.DEBUG)
-    handler = logging.StreamHandler()
-    handler.setLevel(logging.DEBUG)
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-    return logger
-
-logger = get_logger()
+logger = logging.getLogger(st.__name__)
 
 SPARK_MIN_LIMIT = 5
 SPARK_MAX_LIMIT = 40
@@ -142,15 +130,12 @@ def get_sparks(
         echo = True
     )
     with Session(engine) as session:
-        statement = session.query(SparkEmbeddings, Clusters.theme).filter(
-            SparkEmbeddings.cluster_id == Clusters.cluster_id,
-            SparkEmbeddings.map_id == map_id,
-            # SparkEmbeddings.entity_created >= min_date,
-            # SparkEmbeddings.entity_created <= max_date
-        )
+        statement = session.query(SparkEmbeddings, Clusters.theme).\
+            join(Clusters, Clusters.cluster_id == SparkEmbeddings.cluster_id, isouter = True).\
+            filter(SparkEmbeddings.map_id == map_id)
         sparks_df = pd.read_sql(statement.statement, statement.session.bind)
-        logger.debug('Sparks shape: ' + str(sparks_df.shape))
-        logger.debug('Sparks columns: ' + str(sparks_df.columns.tolist()))
+        logger.info('Sparks shape: ' + str(sparks_df.shape))
+        logger.info('Sparks columns: ' + str(sparks_df.columns.tolist()))
         sparks_df['entity_updated'] = pd.to_datetime(sparks_df['entity_updated'])
         sparks_df['entity_created'] = pd.to_datetime(sparks_df['entity_created'])
         return sparks_df
@@ -183,7 +168,7 @@ You can use the following sparks to generate your response:
     [TEXT]{row["fulltext"]}[/TEXT]
 [/SPARK]''' for _, row in sparks.iterrows()]
     ))
-    logger.debug('Prompt length: ' + str(len(re.findall(r'\w+', prompt))))
+    logger.info('Prompt length: ' + str(len(re.findall(r'\w+', prompt))))
     secrets = get_secrets()
     client = openai.OpenAI(
         api_key = secrets['TOGETHER_API_KEY'],
@@ -223,7 +208,7 @@ def generate_synthesys(sparks: pd.DataFrame, model: str) -> str:
 
 
 def parse_response(response: str, sparks: pd.DataFrame) -> str:
-    logger.debug('Response length: ' + str(len(re.findall(r'\w+', response))))
+    logger.info('Response length: ' + str(len(re.findall(r'\w+', response))))
     author_pattern = re.compile(r'[\{\(\[]Author:\s*(?P<name>.*?);(?P<id>.*?)[\}\)\]]')
     spark_pattern = re.compile(r'[\{\(\[]Spark:\s*(?P<id>.*?)[\}\)\]]')
     all_authors = author_pattern.findall(response)
@@ -233,7 +218,7 @@ def parse_response(response: str, sparks: pd.DataFrame) -> str:
             author_name = sparks[sparks['author_id'] == author[1]]['author'].values[0]
         except IndexError:
             continue
-        logger.debug(f'Author {author} name: {author_name}')
+        logger.info(f'Author {author} name: {author_name}')
         replace_pattern = re.compile(r'[\{\(\[]Author:\s*' + re.escape(author[0]) + r';' + re.escape(author[1]) + r'[\}\)\]]')
         response = re.sub(replace_pattern, f'[{author_name}](https://platform.hunome.com/profile/{author[1]})', response)
     for spark in all_sparks:
@@ -241,7 +226,7 @@ def parse_response(response: str, sparks: pd.DataFrame) -> str:
             spark_title = sparks[sparks['spark_id'] == spark]['title'].values[0]
         except IndexError:
             continue
-        logger.debug(f'Spark {spark} title: {spark_title}')
+        logger.info(f'Spark {spark} title: {spark_title}')
         replace_pattern = re.compile(r'[\{\(\[]Spark:\s*' + re.escape(spark) + r'[\}\)\]]')
         response = re.sub(replace_pattern, f'[{spark_title}](https://platform.hunome.com/sparkmap/view-spark/{spark})', response)
     uuid_pattern = re.compile(r'[^/][0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
@@ -249,7 +234,7 @@ def parse_response(response: str, sparks: pd.DataFrame) -> str:
     for uid in all_uids:
         try:
             uid_name = sparks[sparks['spark_id'] == uid[1:]]['title'].values[0]
-            logger.debug(f'UID {uid} name: {uid_name}')
+            logger.info(f'UID {uid} name: {uid_name}')
             replace_pattern = re.compile(r'[^/]' + re.escape(uid))
             response = re.sub(replace_pattern, f'{uid[0]}[{uid_name}](https://platform.hunome.com/sparkmap/view-spark/{uid[1:]})', response)
             continue
@@ -257,7 +242,7 @@ def parse_response(response: str, sparks: pd.DataFrame) -> str:
             pass
         try:
             uid_name = sparks[sparks['author_id'] == uid[1:]]['author'].values[0]
-            logger.debug(f'UID {uid} name: {uid_name}')
+            logger.info(f'UID {uid} name: {uid_name}')
             replace_pattern = re.compile(r'[^/]' + re.escape(uid))
             response = re.sub(replace_pattern, f'{uid[0]}[{uid_name}](https://platform.hunome.com/profile/{uid[1:]})', response)
             continue
@@ -268,7 +253,7 @@ def parse_response(response: str, sparks: pd.DataFrame) -> str:
 
 def format_spark_map_select(sparkmaps: dict[str, list[str, int]], sparkmap_id: str) -> str:
     sparkmap = sparkmaps[sparkmaps['map_id'] == sparkmap_id]
-    return f'{sparkmap["title"].values[0]} (#{sparkmap["count"].values[0]}'
+    return f'{sparkmap["title"].values[0]} (#{sparkmap["count"].values[0]})'
 
 def draw_sparkmap(sparks: pd.DataFrame) -> str:
     pallete = color_palette('pastel', n_colors = sparks.sort_values('cluster_id').cluster_id.unique().shape[0]).as_hex()
@@ -283,7 +268,9 @@ def draw_sparkmap(sparks: pd.DataFrame) -> str:
                 }
     """)
     for _, row in sparks.iterrows():
-        logger.debug(f'Adding node {row["spark_id"]} with color {pallete[row["cluster_id"]] if row["is_selected"] else light_grey}')
+        if row['spark_id'] == 'c79720c0-bf65-4fec-af65-045af831b3c3':
+            continue
+        logger.info(f'Adding node {row["spark_id"]} with color {pallete[row["cluster_id"]] if row["is_selected"] else light_grey}')
         net.add_node(
             row['spark_id'],
             label = row['title'][:20],
@@ -294,6 +281,8 @@ def draw_sparkmap(sparks: pd.DataFrame) -> str:
             '''
         )
     for _, row in sparks.iterrows():
+        if row['spark_id'] == 'c79720c0-bf65-4fec-af65-045af831b3c3':
+            continue
         if row['parent_id'] and row['parent_id'] in sparks.spark_id.values:
             net.add_edge(row['parent_id'], row['spark_id'])
     # Add box shaped nodes with cluster titles
@@ -301,6 +290,8 @@ def draw_sparkmap(sparks: pd.DataFrame) -> str:
     x = -1200
     y = -800
     for cluster_id in sparks.cluster_id.unique():
+        if not cluster_id:
+            continue
         cluster_title = f'Cluster {sparks[sparks["cluster_id"] == cluster_id]["theme"].values[0]} ({sparks[sparks["cluster_id"] == cluster_id].shape[0]})'
         net.add_node(
             cluster_title,
@@ -334,7 +325,7 @@ if __name__ == '__main__':
         format_func = lambda x: format_spark_map_select(sparkmaps, x)
     )
     sparkmap_dates = get_sparkmap_dates(sparkmap_id)
-    logger.debug('Sparkmap dates: ' + str(sparkmap_dates))
+    logger.info('Sparkmap dates: ' + str(sparkmap_dates))
     time_interval = st.sidebar.select_slider(
         'Time interval',
         options = sparkmap_dates,
