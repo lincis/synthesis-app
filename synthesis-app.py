@@ -268,8 +268,8 @@ def draw_sparkmap(sparks: pd.DataFrame) -> str:
                 }
     """)
     for _, row in sparks.iterrows():
-        if row['spark_id'] == 'c79720c0-bf65-4fec-af65-045af831b3c3':
-            continue
+        # if row['spark_id'] == 'c79720c0-bf65-4fec-af65-045af831b3c3':
+        #     continue
         logger.info(f'Adding node {row["spark_id"]} with color {pallete[row["cluster_id"]] if row["is_selected"] else light_grey}')
         net.add_node(
             row['spark_id'],
@@ -281,8 +281,8 @@ def draw_sparkmap(sparks: pd.DataFrame) -> str:
             '''
         )
     for _, row in sparks.iterrows():
-        if row['spark_id'] == 'c79720c0-bf65-4fec-af65-045af831b3c3':
-            continue
+        # if row['spark_id'] == 'c79720c0-bf65-4fec-af65-045af831b3c3':
+        #     continue
         if row['parent_id'] and row['parent_id'] in sparks.spark_id.values:
             net.add_edge(row['parent_id'], row['spark_id'])
     # Add box shaped nodes with cluster titles
