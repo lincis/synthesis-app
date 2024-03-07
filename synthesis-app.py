@@ -297,12 +297,15 @@ def draw_sparkmap(sparks: pd.DataFrame, color_type: str) -> str:
         if color_type == 'Heat':
             heat = np.log(np.exp(1 - row['positive_sentiment']) * np.exp(1 - row['cosine_similarity'])) / 2
             return rgb2hex(cmap(heat))
+        if not row['cluster_id'] or np.isnan(row['cluster_id']):
+            return light_grey
+        # logger.info(f'Cluster id {row["cluster_id"]}')
         return pallete[row['cluster_id']]
     
     for _, row in sparks.iterrows():
         # if row['spark_id'] == 'c79720c0-bf65-4fec-af65-045af831b3c3':
         #     continue
-        logger.info(f'Adding node {row["spark_id"]} with color {pallete[row["cluster_id"]] if row["is_selected"] else light_grey}')
+        # logger.info(f'Adding node {row["spark_id"]} with color {get_color(row, color_type)}')
         net.add_node(
             row['spark_id'],
             label = row['title'][:20],
@@ -322,8 +325,9 @@ def draw_sparkmap(sparks: pd.DataFrame, color_type: str) -> str:
     x = -1200
     y = -800
     for cluster_id in sparks.cluster_id.unique():
-        if not cluster_id:
+        if not cluster_id or np.isnan(cluster_id):
             continue
+        logger.info(f'Adding cluster {cluster_id}')
         cluster_title = f'Cluster {sparks[sparks["cluster_id"] == cluster_id]["theme"].values[0]} ({sparks[sparks["cluster_id"] == cluster_id].shape[0]})'
         net.add_node(
             cluster_title,
