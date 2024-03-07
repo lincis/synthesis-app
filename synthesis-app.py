@@ -11,6 +11,7 @@ import pandas as pd
 # from graphdatascience import GraphDataScience
 from datetime import date
 import openai
+import google.generativeai as genai
 
 from sqlalchemy import create_engine, cast, Date
 from sqlalchemy.orm import Session, DeclarativeBase, aliased
@@ -91,6 +92,7 @@ def get_secrets() -> dict[str, str]:
     secrets['DWH_DBNAME'] = if_client.getSecret(options = GetSecretOptions(project_id = '651c0e8b857bd029208ead6d', environment = 'dev', secret_name = 'DWH_PG_DBNAME')).secret_value
 
     secrets['TOGETHER_API_KEY'] = if_client.getSecret(options = GetSecretOptions(project_id = '651c0e8b857bd029208ead6d', environment = 'dev', secret_name = 'TOGETHER_API_KEY')).secret_value
+    secrets['GOOGLE_API_KEY'] =   if_client.getSecret(options = GetSecretOptions(project_id = '651c0e8b857bd029208ead6d', environment = 'dev', secret_name = 'GOOGLE_API_KEY')).secret_value
 
     # secrets['HNM_NEO4J_HOST'] = if_client.get_secret('HNM_NEO4J_HOST').secret_value
     # secrets['HNM_NEO4J_USER'] = if_client.get_secret('HNM_NEO4J_USER').secret_value
@@ -174,20 +176,26 @@ You can use the following sparks to generate your response:
     ))
     logger.info('Prompt length: ' + str(len(re.findall(r'\w+', prompt))))
     secrets = get_secrets()
-    client = openai.OpenAI(
-        api_key = secrets['TOGETHER_API_KEY'],
-        base_url='https://api.together.xyz',
-    )
-    response = client.chat.completions.create(
-        model = f'mistralai/{model}',
-        messages = [
-            {'role': 'system', 'content': 'You are a helpful assistant.'},
-            {'role': 'user', 'content': prompt},
-        ],
-        temperature = 0.5,
-    )
-    logger.info(f'Token usage: {response.usage}')
-    return response.choices[0].message.content
+    if model.startswith('gemini'):
+        genai.configure(api_key = secrets['GOOGLE_API_KEY'])
+        google_model = genai.GenerativeModel(model)
+        response = google_model.generate_content(prompt)
+        return response.text
+    else:
+        client = openai.OpenAI(
+            api_key = secrets['TOGETHER_API_KEY'],
+            base_url='https://api.together.xyz',
+        )
+        response = client.chat.completions.create(
+            model = f'mistralai/{model}',
+            messages = [
+                {'role': 'system', 'content': 'You are a helpful assistant.'},
+                {'role': 'user', 'content': prompt},
+            ],
+            temperature = 0.5,
+        )
+        logger.info(f'Token usage: {response.usage}')
+        return response.choices[0].message.content
 
 
 @st.cache_data
@@ -341,7 +349,7 @@ if __name__ == '__main__':
     sparkmaps = get_sparkmaps()
     model = st.sidebar.selectbox(
         'Select model',
-        ['Mixtral-8x7B-Instruct-v0.1', 'Mistral-7B-Instruct-v0.2']
+        ['Mixtral-8x7B-Instruct-v0.1', 'Mistral-7B-Instruct-v0.2', 'gemini-pro']
     )
     color_type = st.sidebar.selectbox(
         'Select color type',
