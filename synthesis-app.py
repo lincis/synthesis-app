@@ -6,7 +6,7 @@ import os
 import re
 import datetime
 import hmac
-from infisical import InfisicalClient
+from infisical_client import InfisicalClient, ClientSettings, GetSecretOptions
 import pandas as pd
 # from graphdatascience import GraphDataScience
 from datetime import date
@@ -21,6 +21,9 @@ from sqlalchemy.dialects.postgresql import insert, JSONB, BYTEA
 from pyvis.network import Network
 from tempfile import NamedTemporaryFile
 from seaborn import color_palette
+from matplotlib.colors import LinearSegmentedColormap, rgb2hex
+from scipy import spatial
+import numpy as np
 
 import logging
 logger = logging.getLogger(st.__name__)
@@ -69,6 +72,7 @@ class SparkEmbeddings(Base):
     entity_created = sa.Column(sa.DateTime)
     author_id = sa.Column(sa.VARCHAR(36))
     parent_id = sa.Column(sa.VARCHAR(36))
+    sentiment = sa.Column(JSONB)
 
 class Clusters(Base):
     __tablename__ = "clusters"
@@ -79,14 +83,14 @@ class Clusters(Base):
 @st.cache_data
 def get_secrets() -> dict[str, str]:
     secrets = {}
-    if_client = InfisicalClient(token = os.environ.get('INFISICAL_TOKEN'))
+    if_client = InfisicalClient(ClientSettings(client_id = os.environ.get('INFISICAL_MACHINE_ID'), client_secret = os.environ.get('INFISICAL_TOKEN')))
 
-    secrets['DWH_USER']   = if_client.get_secret('DWH_PG_USER').secret_value
-    secrets['DWH_PW']     = if_client.get_secret('DWH_PG_PW').secret_value
-    secrets['DWH_HOST']   = if_client.get_secret('DWH_PG_HOST').secret_value
-    secrets['DWH_DBNAME'] = if_client.get_secret('DWH_PG_DBNAME').secret_value
+    secrets['DWH_USER']   = if_client.getSecret(options = GetSecretOptions(project_id = '651c0e8b857bd029208ead6d', environment = 'dev', secret_name = 'DWH_PG_USER')).secret_value
+    secrets['DWH_PW']     = if_client.getSecret(options = GetSecretOptions(project_id = '651c0e8b857bd029208ead6d', environment = 'dev', secret_name = 'DWH_PG_PW')).secret_value
+    secrets['DWH_HOST']   = if_client.getSecret(options = GetSecretOptions(project_id = '651c0e8b857bd029208ead6d', environment = 'dev', secret_name = 'DWH_PG_HOST')).secret_value
+    secrets['DWH_DBNAME'] = if_client.getSecret(options = GetSecretOptions(project_id = '651c0e8b857bd029208ead6d', environment = 'dev', secret_name = 'DWH_PG_DBNAME')).secret_value
 
-    secrets['TOGETHER_API_KEY'] = if_client.get_secret('TOGETHER_API_KEY').secret_value
+    secrets['TOGETHER_API_KEY'] = if_client.getSecret(options = GetSecretOptions(project_id = '651c0e8b857bd029208ead6d', environment = 'dev', secret_name = 'TOGETHER_API_KEY')).secret_value
 
     # secrets['HNM_NEO4J_HOST'] = if_client.get_secret('HNM_NEO4J_HOST').secret_value
     # secrets['HNM_NEO4J_USER'] = if_client.get_secret('HNM_NEO4J_USER').secret_value
@@ -255,9 +259,21 @@ def format_spark_map_select(sparkmaps: dict[str, list[str, int]], sparkmap_id: s
     sparkmap = sparkmaps[sparkmaps['map_id'] == sparkmap_id]
     return f'{sparkmap["title"].values[0]} (#{sparkmap["count"].values[0]})'
 
-def draw_sparkmap(sparks: pd.DataFrame) -> str:
+
+def draw_sparkmap(sparks: pd.DataFrame, color_type: str) -> str:
+    cmap = LinearSegmentedColormap.from_list('rg',["g", "y", "r"], N = 256)
     pallete = color_palette('pastel', n_colors = sparks.sort_values('cluster_id').cluster_id.unique().shape[0]).as_hex()
     pallete = {cluster: pallete[i] for i, cluster in enumerate(sparks.cluster_id.unique())}
+    if color_type == 'Heat':
+        sparks['positive_sentiment'] = sparks.sentiment.apply(lambda x: [y['score'] for y in x if y['label'] == 'positive'][0])
+        sparks = sparks.merge(
+            sparks[['spark_id', 'embedding']].rename(columns = {'embedding': 'parent_embedding', 'spark_id': 'parent_id'}),
+            on = 'parent_id', how = 'left'
+        )
+        sparks['cosine_similarity'] = sparks.apply(
+            lambda x: 1 - spatial.distance.cosine(x['embedding'], x['parent_embedding']) if isinstance(x['parent_embedding'], np.ndarray) else 1,
+            axis = 1
+        )
     light_grey = '#d3d3d3'
     net = Network(height = '800px', width = '100%')
     net.set_options("""
@@ -267,6 +283,14 @@ def draw_sparkmap(sparks: pd.DataFrame) -> str:
                     }
                 }
     """)
+    def get_color(row, color_type):
+        if not row['is_selected']:
+            return light_grey
+        if color_type == 'Heat':
+            heat = np.log(np.exp(1 - row['positive_sentiment']) * np.exp(1 - row['cosine_similarity'])) / 2
+            return rgb2hex(cmap(heat))
+        return pallete[row['cluster_id']]
+    
     for _, row in sparks.iterrows():
         # if row['spark_id'] == 'c79720c0-bf65-4fec-af65-045af831b3c3':
         #     continue
@@ -274,7 +298,7 @@ def draw_sparkmap(sparks: pd.DataFrame) -> str:
         net.add_node(
             row['spark_id'],
             label = row['title'][:20],
-            color = pallete[row['cluster_id']] if row['is_selected'] else light_grey,
+            color = get_color(row, color_type),
             title = f'''
             Title: {row['title'][:20]}
             Author: {row['author']}
@@ -319,6 +343,10 @@ if __name__ == '__main__':
         'Select model',
         ['Mixtral-8x7B-Instruct-v0.1', 'Mistral-7B-Instruct-v0.2']
     )
+    color_type = st.sidebar.selectbox(
+        'Select color type',
+        ['Cluster', 'Heat']
+    )
     sparkmap_id = st.sidebar.selectbox(
         'Select Spark Map',
         sparkmaps['map_id'].tolist(),
@@ -345,7 +373,7 @@ if __name__ == '__main__':
         color = 'orange'
     st.sidebar.write(f':{color}[Found {selected_sparks.shape[0]} sparks in {selected_sparks.cluster_id.unique().shape[0]} clusters ({"/".join(sparks_in_cluster.spark_id.astype(str).values.tolist())}).]')
 
-    sparkmap_vis = draw_sparkmap(sparks)
+    sparkmap_vis = draw_sparkmap(sparks, color_type)
     with st.expander('Spark Map visualization', expanded = True):
         st.components.v1.html(sparkmap_vis, height = 820)
 
