@@ -118,7 +118,7 @@ def get_sparkmap_dates(map_id: str) -> list[date]:
     secrets = get_secrets()
     engine = create_engine(f'postgresql+psycopg2://{secrets["DWH_USER"]}:{secrets["DWH_PW"]}@{secrets["DWH_HOST"]}:5432/{secrets["DWH_DBNAME"]}')
     with Session(engine) as session:
-        sparkmap_dates = session.query(cast(SparkEmbeddings.entity_created, Date)).filter(
+        sparkmap_dates = session.query(cast(SparkEmbeddings.entity_updated, Date)).filter(
             SparkEmbeddings.map_id == map_id
         ).distinct().all()
         dates = [row[0] for row in sparkmap_dates]
@@ -381,9 +381,9 @@ if __name__ == '__main__':
     color = 'green'
     if selected_sparks.shape[0] < 5:
         color = 'red'
-    elif sparks_in_cluster.spark_id.max() > 50 and selected_sparks['entity_updated'].dt.date.unique().shape[0] > 1:
+    elif sparks_in_cluster.spark_id.max() > 50 and selected_sparks['entity_updated'].dt.date.nunique() > 1:
         color = 'orange'
-    st.sidebar.write(f':{color}[Found {selected_sparks.shape[0]} sparks in {selected_sparks.cluster_id.unique().shape[0]} clusters ({"/".join(sparks_in_cluster.spark_id.astype(str).values.tolist())}).]')
+    st.sidebar.write(f':{color}[Found {selected_sparks.shape[0]} sparks in {selected_sparks.cluster_id.nunique()} clusters ({"/".join(sparks_in_cluster.spark_id.astype(str).values.tolist())}).]')
 
     sparkmap_vis = draw_sparkmap(sparks, color_type)
     with st.expander('Spark Map visualization', expanded = True):
