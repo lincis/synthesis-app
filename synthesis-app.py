@@ -11,7 +11,6 @@ import pandas as pd
 # from graphdatascience import GraphDataScience
 from datetime import date
 import openai
-import google.generativeai as genai
 
 from sqlalchemy import create_engine, cast, Date
 from sqlalchemy.orm import Session, DeclarativeBase, aliased
@@ -25,6 +24,11 @@ from seaborn import color_palette
 from matplotlib.colors import LinearSegmentedColormap, rgb2hex
 from scipy import spatial
 import numpy as np
+
+import instructor
+from pydantic import Field, BaseModel, model_validator, FieldValidationInfo
+from typing import List
+import json
 
 import logging
 logger = logging.getLogger(st.__name__)
@@ -93,6 +97,7 @@ def get_secrets() -> dict[str, str]:
 
     secrets['TOGETHER_API_KEY'] = if_client.getSecret(options = GetSecretOptions(project_id = '651c0e8b857bd029208ead6d', environment = 'dev', secret_name = 'TOGETHER_API_KEY')).secret_value
     secrets['GOOGLE_API_KEY'] =   if_client.getSecret(options = GetSecretOptions(project_id = '651c0e8b857bd029208ead6d', environment = 'dev', secret_name = 'GOOGLE_API_KEY')).secret_value
+    secrets['OPENAI_API_KEY'] =   if_client.getSecret(options = GetSecretOptions(project_id = '651c0e8b857bd029208ead6d', environment = 'dev', secret_name = 'OPENAI_API_KEY')).secret_value
 
     # secrets['HNM_NEO4J_HOST'] = if_client.get_secret('HNM_NEO4J_HOST').secret_value
     # secrets['HNM_NEO4J_USER'] = if_client.get_secret('HNM_NEO4J_USER').secret_value
@@ -146,59 +151,46 @@ def get_sparks(
         sparks_df['entity_created'] = pd.to_datetime(sparks_df['entity_created'])
         return sparks_df
 
+class Idea(BaseModel):
+    idea: str = Field(..., title = 'Idea')
+    article_id: str = Field(..., title = 'ID of the article')
+    author: str = Field(..., title = 'Author of the article')
+
+class ExtractedIdeas(BaseModel):
+    """Extracted ideas from a set of articles"""
+    ideas: List[Idea] = Field(..., title = 'Extracted ideas')
+
+def build_context(sparks: pd.DataFrame) -> str:
+    context = []
+    for _, row in sparks.iterrows():
+        context.append({
+            'id': row['spark_id'],
+            'title': row['title'],
+            'text': row['fulltext'],
+            'author': row['author_id'],
+            'parent_id': row['parent_id'],
+            'created': row['entity_created'].strftime('%Y-%m-%d %H:%M:%S'),
+        })
+    return json.dumps(context)
+
 @st.cache_data
-def get_synthesis(sparks: pd.DataFrame, model:str) -> str:
-    prompt_template = '''
-You will extract a summary of discussion from the list of sparks below.
-You will use exact citations from the sparks to support the summary, mentioning the author with name and ID as {Author:Name;author-id} and spark as {Spark:spark-id}.
-You should constrain your synthesis to minimum 5 and maximum 10 key ideas discussed.
-You should not introduce new ideas, but only summarize the existing ones.
-Your response should be like a recap of discussion, taking into account the chronology of the sparks. Each spark may have a parent within the given set, outside it or not set. Is parent ID is set it means that the given Spark is a response to the parent spark.
-Please do not add the date and parent of the spark, but use the order of the sparks to determine the chronology.
-Please write the response as an essay, not as a list of citations.
-Here is an example respones, please make sure you strictly follow the format:
-
-{Author:John Doe;john-doe-id} stated that The world is flat [{Spark:spark-1-id}]. However, {Author:Jane Doe;jane-doe-id} disagreed and said that The world is round [{Spark:spark-2-id}]. {Author:Harry Kane;harry-kane-id} summarized that The world is round, but it is flat in some places[{Spark:spark-3-id}].
-
-You can use the following sparks to generate your response:
-{{SPARKS}}
-    '''
-    prompt = prompt_template.replace('{{SPARKS}}', '\n'.join(
-        [f'''
-[SPARK]
-    [ID]{row["spark_id"]}[/ID]
-    [AUTHOR][NAME]{row["author"]}[/NAME][ID]{row["author_id"]}[/ID][/AUTHOR]
-    [PARENT]{row["parent_id"]}[/PARENT]
-    [CREATED]{row["entity_created"]}[/CREATED]
-    [TITLE]{row["title"]}[/TITLE]
-    [TEXT]{row["fulltext"]}[/TEXT]
-[/SPARK]''' for _, row in sparks.iterrows()]
-    ))
-    logger.info('Prompt length: ' + str(len(re.findall(r'\w+', prompt))))
+def get_synthesis(sparks: pd.DataFrame, model:str) -> dict:
     secrets = get_secrets()
-    if model.startswith('gemini'):
-        genai.configure(api_key = secrets['GOOGLE_API_KEY'])
-        google_model = genai.GenerativeModel(model)
-        response = google_model.generate_content(prompt)
-        return response.text
-    else:
-        client = openai.OpenAI(
-            api_key = secrets['TOGETHER_API_KEY'],
-            base_url='https://api.together.xyz',
-        )
-        response = client.chat.completions.create(
-            model = f'mistralai/{model}',
-            messages = [
-                {'role': 'system', 'content': 'You are a helpful assistant.'},
-                {'role': 'user', 'content': prompt},
-            ],
-            temperature = 0.5,
-        )
-        logger.info(f'Token usage: {response.usage}')
-        return response.choices[0].message.content
+    client = instructor.patch(openai.OpenAI(api_key=secrets['OPENAI_API_KEY']))
+    ideas: ExtractedIdeas = client.chat.completions.create(
+        model=model,
+        response_model=ExtractedIdeas,
+        messages=[
+            {"role": "system", "content": """
+You are a system that extracts main ideas from a set of articles. You must use only the provided context and extract up to 10 ideas.\
+You do observe the hierarchy of the articles indicated by parent_id and their chronological order."""},
+            {"role": "user", "content": build_context(sparks)}
+        ]
+    )
+    logger.info('Tokens in response: ' + str(ideas._raw_response.usage))
+    return ideas.ideas
 
 
-@st.cache_data
 def generate_synthesys(sparks: pd.DataFrame, model: str) -> str:
     unique_dates = sparks['entity_updated'].dt.date.unique().shape[0]
     sparks_in_cluster = sparks.groupby('cluster_id').count()['spark_id'].reset_index()
@@ -209,58 +201,34 @@ def generate_synthesys(sparks: pd.DataFrame, model: str) -> str:
     if sparks.shape[0] > SPARK_MAX_LIMIT and sparks_in_cluster.shape[0] > 1:
         synthesis = ''
         for cluster in sparks.cluster_id.unique():
+            if sparks[sparks['cluster_id'] == cluster].empty:
+                continue
             cluster_theme = sparks[sparks['cluster_id'] == cluster]['theme'].values[0]
             cluster_sparks = sparks[sparks['cluster_id'] == cluster]
             cluster_synthesis = get_synthesis(cluster_sparks, model)
-            synthesis += f'**Cluster: {cluster_theme}**\n\n{cluster_synthesis}\n\n'
+            synthesis += f'**Cluster: {cluster_theme}**\n\n{parse_response(cluster_synthesis, cluster_sparks)}\n\n'
         return synthesis
     else:
-        return get_synthesis(sparks, model)
+        return parse_response(get_synthesis(sparks, model), sparks)
 
 
 
 def parse_response(response: str, sparks: pd.DataFrame) -> str:
-    logger.info('Response length: ' + str(len(re.findall(r'\w+', response))))
-    author_pattern = re.compile(r'[\{\(\[]Author:\s*(?P<name>.*?);(?P<id>.*?)[\}\)\]]')
-    spark_pattern = re.compile(r'[\{\(\[]Spark:\s*(?P<id>.*?)[\}\)\]]')
-    all_authors = author_pattern.findall(response)
-    all_sparks = spark_pattern.findall(response)
-    for author in all_authors:
-        try:
-            author_name = sparks[sparks['author_id'] == author[1]]['author'].values[0]
-        except IndexError:
-            continue
-        logger.info(f'Author {author} name: {author_name}')
-        replace_pattern = re.compile(r'[\{\(\[]Author:\s*' + re.escape(author[0]) + r';' + re.escape(author[1]) + r'[\}\)\]]')
-        response = re.sub(replace_pattern, f'[{author_name}](https://platform.hunome.com/profile/{author[1]})', response)
-    for spark in all_sparks:
-        try:
-            spark_title = sparks[sparks['spark_id'] == spark]['title'].values[0]
-        except IndexError:
-            continue
-        logger.info(f'Spark {spark} title: {spark_title}')
-        replace_pattern = re.compile(r'[\{\(\[]Spark:\s*' + re.escape(spark) + r'[\}\)\]]')
-        response = re.sub(replace_pattern, f'[{spark_title}](https://platform.hunome.com/sparkmap/view-spark/{spark})', response)
-    uuid_pattern = re.compile(r'[^/][0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
-    all_uids = uuid_pattern.findall(response)
-    for uid in all_uids:
-        try:
-            uid_name = sparks[sparks['spark_id'] == uid[1:]]['title'].values[0]
-            logger.info(f'UID {uid} name: {uid_name}')
-            replace_pattern = re.compile(r'[^/]' + re.escape(uid))
-            response = re.sub(replace_pattern, f'{uid[0]}[{uid_name}](https://platform.hunome.com/sparkmap/view-spark/{uid[1:]})', response)
-            continue
-        except IndexError:
-            pass
-        try:
-            uid_name = sparks[sparks['author_id'] == uid[1:]]['author'].values[0]
-            logger.info(f'UID {uid} name: {uid_name}')
-            replace_pattern = re.compile(r'[^/]' + re.escape(uid))
-            response = re.sub(replace_pattern, f'{uid[0]}[{uid_name}](https://platform.hunome.com/profile/{uid[1:]})', response)
-            continue
-        except IndexError:
-            pass
-    return response
+    logger.info('Response length: ' + str(len(response)))
+    # logger.info('Response: ' + str(response))
+    # response = re.sub(replace_pattern, f'[{author_name}](https://platform.hunome.com/profile/{author[1]})', response)
+    # response = re.sub(replace_pattern, f'[{spark_title}](https://platform.hunome.com/sparkmap/view-spark/{spark})', response)
+    parsed_response = ''
+    i = 1
+    for idea in response:
+        author_name = sparks[sparks['author_id'] == idea.author]['author'].values[0] if not sparks[sparks['author_id'] == idea.author].empty else idea.author
+        spark_title = sparks[sparks['spark_id'] == idea.article_id]['title'].values[0] if not sparks[sparks['spark_id'] == idea.article_id].empty else idea.article_id
+        parsed_response += f'1. {idea.idea} ([{spark_title}](https://platform.hunome.com/sparkmap/view-spark/{idea.article_id}) by [{author_name}](https://platform.hunome.com/profile/{idea.author}))\n\n'
+        i += 1
+
+    # logger.info('Parsed response: ' + str(parsed_response))
+    return parsed_response
+
 
 
 def format_spark_map_select(sparkmaps: dict[str, list[str, int]], sparkmap_id: str) -> str:
@@ -327,7 +295,7 @@ def draw_sparkmap(sparks: pd.DataFrame, color_type: str) -> str:
     for cluster_id in sparks.cluster_id.unique():
         if not cluster_id or np.isnan(cluster_id):
             continue
-        logger.info(f'Adding cluster {cluster_id}')
+        # logger.info(f'Adding cluster {cluster_id}')
         cluster_title = f'Cluster {sparks[sparks["cluster_id"] == cluster_id]["theme"].values[0]} ({sparks[sparks["cluster_id"] == cluster_id].shape[0]})'
         net.add_node(
             cluster_title,
@@ -353,7 +321,7 @@ if __name__ == '__main__':
     sparkmaps = get_sparkmaps()
     model = st.sidebar.selectbox(
         'Select model',
-        ['Mixtral-8x7B-Instruct-v0.1', 'Mistral-7B-Instruct-v0.2', 'gemini-pro']
+        ['gpt-3.5-turbo', 'gpt-4-turbo']
     )
     color_type = st.sidebar.selectbox(
         'Select color type',
@@ -365,7 +333,7 @@ if __name__ == '__main__':
         format_func = lambda x: format_spark_map_select(sparkmaps, x)
     )
     sparkmap_dates = get_sparkmap_dates(sparkmap_id)
-    logger.info('Sparkmap dates: ' + str(sparkmap_dates))
+    # logger.info('Sparkmap dates: ' + str(sparkmap_dates))
     time_interval = st.sidebar.select_slider(
         'Time interval',
         options = sparkmap_dates,
@@ -390,11 +358,11 @@ if __name__ == '__main__':
         st.components.v1.html(sparkmap_vis, height = 820)
 
     if st.sidebar.button('Generate synthesis'):
-        st.write(parse_response(generate_synthesys(selected_sparks, model), sparks))
+        synthesis = generate_synthesys(selected_sparks, model)
+        st.write(synthesis)
 
     if st.sidebar.button("Clear synthesis cache"):
         get_synthesis.clear()
-        generate_synthesys.clear()
     st.sidebar.markdown('---')
     st.sidebar.markdown(f'''
     **NB!** Minimum number of sparks for synthesis is {SPARK_MIN_LIMIT}.
