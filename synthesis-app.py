@@ -188,6 +188,7 @@ You do observe the hierarchy of the articles indicated by parent_id and their ch
         ]
     )
     logger.info('Tokens in response: ' + str(ideas._raw_response.usage))
+    logger.info('Response: ' + str(ideas.ideas))
     return ideas.ideas
 
 
